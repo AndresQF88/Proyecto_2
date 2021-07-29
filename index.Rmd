@@ -1,0 +1,312 @@
+---
+title: "Proyecto_#2"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+---
+
+```{r Carga de Datos, message=FALSE, warning=FALSE}
+library(sf)
+library(raster)
+library(dplyr)
+library(spData)
+library(leaflet)
+library(plotly)
+library(DT)
+library(tidyr)
+library(ggplot2)
+library(flexdashboard)
+
+
+orq <-
+  st_read(
+    "https://raw.githubusercontent.com/gf0604-procesamientodatosgeograficos/2021i-datos/main/gbif/orchidaceae-cr-registros.csv",
+    options = c(
+      "X_POSSIBLE_NAMES=decimalLongitude",
+      "Y_POSSIBLE_NAMES=decimalLatitude"
+    ),
+    quiet = TRUE
+  )
+
+
+# Capa geoespacial de cantones
+cantones <-
+  st_read(
+    "https://raw.githubusercontent.com/gf0604-procesamientodatosgeograficos/2021i-datos/main/ign/delimitacion-territorial-administrativa/cr_cantones_simp_wgs84.geojson",
+    quiet = TRUE
+  )
+
+provincias <-
+  st_read(
+    "https://raw.githubusercontent.com/gf0604-procesamientodatosgeograficos/2021i-datos/main/ign/delimitacion-territorial-administrativa/cr_provincias_simp_wgs84.geojson",
+    quiet = TRUE
+  )
+
+
+st_crs(orq) = 4326
+st_crs(provincias) = 4326
+st_crs(cantones) = 4326
+
+orq <- orq %>%
+  filter(!is.na(coordinateUncertaintyInMeters) & coordinateUncertaintyInMeters <= 1000)%>%
+  filter(species!="En Blanco")
+```
+
+
+```{r}
+orq <-
+  orq %>%st_join(cantones["canton"]) %>%
+  st_join(provincias["provincia"])
+```
+
+```{r}
+orq_r <-
+  provincias %>%
+  st_join(orq) %>%
+  group_by(provincia.x) %>%
+  summarize(especies = n())
+```
+
+```{r Datos Raster, message=FALSE, warning=FALSE}
+alt <-
+  raster::getData(
+    "worldclim",
+    var = "alt",
+    res = 0.5,
+    lon = -84,
+    lat = 10
+  )
+
+altitud <-
+  alt %>%
+  crop(provincias) %>%
+  mask(provincias)
+
+rast_p <-
+  altitud %>%
+  aggregate(fact = 10)
+
+orq_rast <-
+  rasterize(orq,
+            rast_p,
+            field = 1,
+            fun = "count") %>%
+  crop(provincias) %>%
+  mask(provincias)
+
+
+total <- orq %>%
+  st_drop_geometry() %>%
+  summarize(n(),
+            especies = n_distinct(species, na.rm = TRUE),
+            gene = n_distinct(genus, na.rm = TRUE)) %>%
+  rename(total = "n()")
+```
+
+```{r Datos Pastel, message=FALSE, warning=FALSE}
+orq$species[orq$species == ""] <- "otros"
+
+orq_10 <-
+  orq %>% 
+  group_by(species) %>%
+  st_drop_geometry() %>%
+  tally()
+```
+
+# Información 
+
+Column {data-width=500}
+-----------------------------------------------------------------------
+
+### Tabla de Registro 
+
+```{r Tabla de Registro de Orquídeas}
+
+# Tabla de registros de presencia
+orq %>%
+  st_drop_geometry() %>%
+  select(stateProvince, canton, species, family, eventDate) %>%
+  datatable(
+    colnames = c("Provincia", "Canton", "Especies", "Familia", "Fecha"),
+    options = list(
+      searchHighlight = TRUE,
+      language = list(url = '//cdn.datatables.net/plug-ins/1.10.11/i18n/Spanish.json'),
+      pageLength = 5
+    )
+  )
+```
+
+
+### Mapa 
+
+```{r Mapa de Orquídeas}
+# Paleta de colores
+colores_especies <-
+  colorNumeric(palette = "YlGnBu",
+               domain = orq$especies,
+               na.color = "transparent")
+
+
+rast_pal <-
+  colorNumeric(
+    c(
+      "#993366",
+      "#660033",
+      "#CC0066",
+      "#CC3399",
+      "#FF66CC",
+      "#CC66CC"
+    ),
+    values(orq_rast),
+    na.color = "transparent"
+  )
+
+## popups
+
+orqpop <- paste0(
+  "<b>",
+  "Nombre orquidea: ",
+  "</b>",
+  (orq$species),
+  "<br>",
+  "<b>",
+  "Genero: ",
+  "</b>",
+  (orq$genus),
+  "<br>",
+  "<b>",
+  "Provincia: ",
+  "</b>",
+  (orq$provincia),
+  "<br>",
+  "<b>",
+  "Canton: ",
+  "</b>",
+  (orq$canton),
+  "<br>",
+  "<b>",
+  "Fecha de registro: ",
+  "</b>",
+  (orq$eventDate)
+)
+
+orq %>%
+  select(species,
+         canton,
+         stateProvince,
+         eventDate) %>%
+  leaflet() %>%
+  setView(lng = -84.0,
+          lat = 10.0,
+          zoom = 8) %>%
+  addProviderTiles(providers$OpenStreetMap.Mapnik, group = "OSM") %>%
+  addPolygons(
+    data = orq_r,
+    fillColor = ~ colores_registros(orq_r$especies),
+    fillOpacity = 0.5,
+    stroke = TRUE,
+    color = "black",
+    weight = 1,
+    group = "Poligonos de registros"
+  ) %>%
+  addCircleMarkers(
+    stroke = F,
+    radius = 4,
+    fillColor = "#0099664",
+    fillOpacity = 1,
+    popup = orqpop,
+    clusterOptions = markerClusterOptions(),
+    group = "Circle markers especies"
+  ) %>%
+  addRasterImage(orq_rast,
+                 colors = rast_pal,
+                 opacity = 1,
+                 group = "Raster presencia de orquideas") %>%
+  addLayersControl(
+    baseGroups = c("OSM"),
+    overlayGroups = c(
+      "Raster presencia de orquideas",
+      "Poligonos de registros",
+      "Circle markers especies"
+    )
+  ) %>%
+  addScaleBar(position = "bottomright", options = scaleBarOptions(imperial = FALSE)) %>%
+  addMiniMap(
+    tiles = providers$Esri.WorldGrayCanvas,
+    position = "bottomright",
+    toggleDisplay = TRUE
+  ) %>%
+  addLegend(
+    position = "bottomleft",
+    values = orq_r$especies,
+    pal = colores_registros,
+    group = "Poligonos de registros",
+    title = "Cantidad espcies - orquideas"
+  )
+```
+
+### Grafico pastel
+
+```{r}
+ex_orq_10 <- data.frame("Categoria" = rownames(orq_10), orq_10)
+orq_data <- ex_orq_10[, c('Categoria', 'species')]
+
+fig <-
+  plot_ly(
+    labels = ~ c(
+      "Epidendrum radicans",
+      "Epidendrum exasperatum",
+      "Elleanthus tonduzii",
+      "Elleanthus hymenophorus",
+      "Pleurothallis ruscifolia",
+      "Maxillaria dendrobioides",
+      "Elleanthus glaucophyllus",
+      "Habenaria monorrhiza",
+      "Epidendrum anoglossum",
+      "Epidendrum centropetalum"
+    ),
+    values = ~ c(305, 182, 171,162, 151, 146, 137, 126, 118, 118),
+    type = 'pie'
+  ) %>%
+  config(locale = "es") %>% layout(
+    title = 'Especies de Orquídeas',
+    
+    xaxis = list(
+      showgrid = FALSE,
+      zeroline = FALSE,
+      showticklabels = FALSE
+    ),
+    
+    yaxis = list(
+      showgrid = FALSE,
+      zeroline = FALSE,
+      showticklabels = FALSE
+    )
+  )
+
+fig
+```
+
+
+Column {data-width=500}
+-----------------------------------------------------------------------
+
+### Registro total
+
+```{r}
+valueBox(formattable::comma(total$total,digits=0),color="#FFCC66")
+```
+
+### Total de especies
+
+```{r}
+valueBox(formattable::comma(total$especies,digits=0),color="#66CC33")
+```
+
+### Total de géneros
+
+```{r}
+valueBox(formattable::comma(total$gene,digits=0),color="#CC3366")
+```
+
